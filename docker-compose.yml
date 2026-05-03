@@ -1,0 +1,274 @@
+# docker-compose.yml — Multi-Container Application Definition
+#
+# Docker Compose lets you define and run multiple containers as one application.
+# Instead of running 5 separate "docker run" commands with complex flags,
+# "docker compose up" starts everything with correct networking and dependencies.
+#
+# Each "service" below becomes one container. Docker Compose automatically creates
+# a private network and gives each container a DNS name matching its service name.
+# So the gateway can reach vLLM at http://vllm:8000 without knowing its IP.
+#
+# Usage:
+#   docker compose up -d        # Start all services in the background
+#   docker compose logs -f vllm # Stream logs from the vllm service
+#   docker compose down         # Stop and remove all containers
+
+version: '3.8'
+# The Compose file format version. 3.8 supports the "deploy.resources" syntax
+# needed for GPU reservation below.
+
+services:
+
+  # =========================================================================
+  # vLLM — LLM Inference Server
+  # =========================================================================
+  # vLLM is the core inference engine. It:
+  #   - Loads the model weights into GPU memory at startup
+  #   - Exposes an OpenAI-compatible REST API at port 8000
+  #   - Implements PagedAttention (efficient KV cache management)
+  #   - Implements continuous batching (serves multiple requests simultaneously)
+  #   - Exposes Prometheus metrics at GET /metrics
+  vllm:
+    image: vllm/vllm-openai:latest
+    # Use the official vLLM Docker image from Docker Hub. The "latest" tag always
+    # pulls the most recent release. For production, pin to a specific version
+    # (e.g. vllm/vllm-openai:v0.4.2) to avoid surprise breaking changes.
+    # This image includes CUDA, PyTorch, FlashAttention, and vLLM pre-compiled.
+
+    runtime: nvidia
+    # Tell Docker to use the NVIDIA container runtime for this container.
+    # This runtime injects CUDA libraries and GPU device files into the container,
+    # making the GPU visible inside it. Requires nvidia-container-toolkit on the host
+    # (pre-installed on RunPod and most cloud GPU VMs).
+
+    environment:
+      # Environment variables passed into the container at startup.
+      # vLLM reads HF_TOKEN to authenticate downloads from Hugging Face Hub.
+      # Some models (like Llama) are gated — you must accept their license on
+      # huggingface.co and use your token to download them.
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
+      # ${HF_TOKEN} is a variable substitution — Docker Compose reads this value
+      # from the .env file in the same directory as this compose file.
+      - NVIDIA_VISIBLE_DEVICES=all
+      # Tell the NVIDIA runtime to expose all available GPUs to this container.
+      # If you had 4 GPUs and wanted only GPU 0, you'd set this to "0".
+
+    volumes:
+      # Volumes mount host filesystem paths into the container.
+      # Format: "host_path:container_path"
+      # Here we mount the host's Hugging Face cache directory into the container.
+      # This means: model weights downloaded once persist across container restarts.
+      # Without this, vLLM would re-download the entire model (several GB) every restart.
+      - ~/.cache/huggingface:/root/.cache/huggingface
+
+    ports:
+      # Port mapping: "host_port:container_port"
+      # Makes port 8000 inside the container accessible at port 8000 on the host.
+      # You can then call: curl http://localhost:8000/health from the host.
+      # Other containers on the same Docker network reach vLLM at vllm:8000 directly,
+      # without going through port mapping.
+      - "8000:8000"
+
+    command: >
+      # The command overrides the Docker image's default CMD.
+      # These are vLLM server flags passed to: python -m vllm.entrypoints.openai.api_server
+      #
+      --model Qwen/Qwen2.5-3B-Instruct
+      # The Hugging Face model ID to load. vLLM downloads it from HF Hub if not cached.
+      # Qwen2.5-3B-Instruct: 3 billion parameter instruction-tuned model.
+      # At fp16, weights consume ~6GB VRAM, leaving ~18GB for KV cache on a 24GB GPU.
+
+      --dtype float16
+      # Inference precision. float16 (half precision):
+      #   - Uses half the VRAM vs float32
+      #   - Modern GPUs (Ampere+) have dedicated float16 tensor cores — fast
+      #   - Minimal quality loss for inference (training needs float32 for gradients)
+
+      --max-model-len 8192
+      # Maximum context window length in tokens. This caps the combined length of
+      # prompt + generated output. Larger values reserve more KV cache memory.
+      # 8192 is a good balance — large enough for real conversations, not so large
+      # it starves concurrent requests of KV cache space.
+
+      --gpu-memory-utilization 0.85
+      # What fraction of GPU VRAM vLLM can use for KV cache.
+      # 0.85 = 85%. The remaining 15% is left for CUDA kernels, PyTorch overhead, etc.
+      # Higher values = more cache = more concurrent requests before eviction (preemption).
+      # Too high (0.98+) risks OOM (Out of Memory) crashes. 0.85 is a safe starting point.
+
+      --max-num-batched-tokens 8192
+      # The maximum total tokens across all requests in a single forward pass.
+      # This is the core continuous batching parameter. vLLM batches requests together
+      # in the same GPU compute step (a "prefill" or "decode" step).
+      # Higher = better GPU utilization but more memory per step.
+
+      --max-num-seqs 256
+      # Maximum number of sequences (requests) vLLM will hold in memory simultaneously,
+      # across both the running and waiting queues.
+      # This bounds worst-case KV cache memory consumption.
+
+      --enable-prefix-caching
+      # Enable automatic KV cache reuse for common prompt prefixes.
+      # If multiple requests share the same system prompt, vLLM computes the KV cache
+      # for that prefix once and reuses it — dramatically reducing TTFT for those requests.
+      # Experiment A in the benchmarking notebook measures this effect.
+
+      --served-model-name qwen2.5-3b
+      # The model name clients send in the "model" field of their API requests.
+      # Without this, clients must use the full HF ID ("Qwen/Qwen2.5-3B-Instruct").
+      # With this alias, clients just send "qwen2.5-3b".
+
+      --tensor-parallel-size 1
+      # Number of GPUs to split the model across for tensor parallelism.
+      # 1 = no splitting (single GPU). Only meaningful with 2+ GPUs.
+      # Including it explicitly documents the single-GPU decision.
+
+    healthcheck:
+      # Docker periodically runs this command to check if the service is healthy.
+      # Other services that depend_on vllm with condition: service_healthy will
+      # wait until this check passes before starting.
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      # curl -f: returns exit code 1 (failure) if HTTP status is 4xx or 5xx.
+      # Docker interprets non-zero exit codes as "unhealthy".
+      interval: 30s       # Run the check every 30 seconds
+      timeout: 10s        # If the command takes longer than 10s, mark as unhealthy
+      retries: 5          # Mark as unhealthy only after 5 consecutive failures
+      start_period: 120s  # Give vLLM 2 minutes to load the model before checking.
+                          # Without this, Docker would mark it unhealthy during model loading.
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            # Reserve a GPU for this container. Docker Compose will fail to start
+            # this service if no GPU matching this spec is available on the host.
+            - driver: nvidia
+              count: 1           # Reserve exactly 1 GPU
+              capabilities: [gpu] # Must have GPU capability (not just display)
+
+
+  # =========================================================================
+  # Gateway — FastAPI Proxy Layer
+  # =========================================================================
+  # Our custom Python service that wraps vLLM with auth, rate limiting, tracing, metrics.
+  gateway:
+    build: ./gateway
+    # "build: ./gateway" means: build a Docker image from the Dockerfile in ./gateway/.
+    # Docker Compose automatically rebuilds if the Dockerfile or source files change.
+    # Contrast with "image: ..." which uses a pre-built image from a registry.
+
+    ports:
+      - "8080:8080"
+      # Clients call the gateway at port 8080, not vLLM at 8000 directly.
+      # vLLM's port 8000 could be unexposed (no "ports" entry) in a hardened setup.
+
+    environment:
+      - VLLM_URL=http://vllm:8000
+      # "vllm" resolves to the vLLM container's IP via Docker's internal DNS.
+      # This is how the gateway knows where to forward requests.
+      - API_KEYS=${API_KEYS}
+      # Comma-separated valid API keys, read from .env file.
+      - RATE_LIMIT_RPM=60
+      # Max requests per minute per IP address.
+
+    depends_on:
+      vllm:
+        condition: service_healthy
+      # Don't start the gateway until vLLM is healthy (model loaded, accepting requests).
+      # Without this, the gateway might start and fail because vLLM isn't ready yet.
+
+
+  # =========================================================================
+  # Prometheus — Metrics Collection and Storage
+  # =========================================================================
+  # Prometheus is a time-series database. It works by "scraping" — periodically
+  # making HTTP GET requests to your services' /metrics endpoints and storing
+  # the values with timestamps. Grafana then queries Prometheus to draw charts.
+  prometheus:
+    image: prom/prometheus:latest
+    # Official Prometheus image from Docker Hub.
+
+    ports:
+      - "9090:9090"
+      # Prometheus's own web UI is accessible at http://localhost:9090.
+      # You can run PromQL queries directly here to debug metric collection
+      # before visualizing in Grafana.
+
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      # Mount our custom scrape config into the location Prometheus expects.
+      # This tells Prometheus which services to scrape and how often.
+      - prometheus_data:/prometheus
+      # Named volume for persistent storage of scraped metrics.
+      # Without this, all metric history is lost when the container restarts.
+
+    command:
+      # Override the default Prometheus startup command to add extra flags.
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      # Tell Prometheus where to find its config (the file we mounted above).
+      - '--storage.tsdb.retention.time=7d'
+      # Keep 7 days of metric data before automatically deleting old data.
+      # For a short benchmarking session, even 1d would be sufficient.
+
+
+  # =========================================================================
+  # Grafana — Metrics Visualization and Dashboards
+  # =========================================================================
+  # Grafana is the visualization layer. It connects to Prometheus as a "data source"
+  # and renders the metrics as charts, graphs, and dashboards.
+  grafana:
+    image: grafana/grafana:latest
+    # Official Grafana image from Docker Hub.
+
+    ports:
+      - "3000:3000"
+      # Grafana's web UI. Open http://localhost:3000 in your browser to see dashboards.
+
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      # Default admin password for the Grafana UI. Change this in production.
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      # Allow viewing dashboards without logging in. Convenient for local development.
+
+    volumes:
+      - grafana_data:/var/lib/grafana
+      # Persist Grafana's database (dashboards, users, settings) across restarts.
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      # Grafana "provisioning" auto-configures data sources and dashboard folders
+      # from YAML files on startup. No manual UI setup needed.
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+      # Mount our dashboard JSON files so Grafana loads them automatically.
+
+
+  # =========================================================================
+  # NVIDIA GPU Exporter — Hardware Metrics Bridge
+  # =========================================================================
+  # vLLM's /metrics endpoint covers inference-level metrics (KV cache, throughput).
+  # But it doesn't expose hardware counters (GPU utilization %, VRAM used, temperature).
+  # nvidia-gpu-exporter bridges NVIDIA's NVML library (same library as nvidia-smi)
+  # and exposes those hardware metrics in Prometheus format at port 9835.
+  nvidia-exporter:
+    image: utkuozdemir/nvidia_gpu_exporter:1.1.0
+    # Third-party exporter that uses NVML (no DCGM required).
+
+    runtime: nvidia
+    # Needs GPU access (via NVIDIA runtime) to query NVML for hardware stats.
+
+    ports:
+      - "9835:9835"
+      # Prometheus scrapes this port for GPU hardware metrics.
+
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      # Expose metrics for all GPUs. With a single GPU, this reports GPU 0.
+
+
+# =========================================================================
+# Named Volumes — Persistent Storage Definitions
+# =========================================================================
+# Named volumes are managed by Docker (stored in /var/lib/docker/volumes/ on the host).
+# They persist data across container restarts and removals.
+# Listed here so Docker Compose knows to create them if they don't exist.
+volumes:
+  prometheus_data:   # Stores Prometheus's time-series metric database
+  grafana_data:      # Stores Grafana's SQLite database (dashboards, users, settings)

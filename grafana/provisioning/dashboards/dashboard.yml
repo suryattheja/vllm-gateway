@@ -1,0 +1,51 @@
+# grafana/provisioning/dashboards/dashboard.yml — Grafana Dashboard Provider Config
+#
+# This file tells Grafana WHERE to look for dashboard JSON files and how to load them.
+# It's a "provider" — a bridge between a storage location (our mounted directory)
+# and Grafana's internal dashboard registry.
+#
+# Workflow:
+#   1. You create or export a dashboard as a JSON file
+#   2. Place the JSON file in ./grafana/dashboards/ on the host
+#   3. Docker Compose mounts that directory into the container
+#   4. Grafana reads this provider config and scans that directory at startup
+#   5. All JSON files found are automatically loaded as dashboards
+#
+# This means dashboards are version-controlled alongside your code —
+# no manual import/export needed when deploying to a new environment.
+
+apiVersion: 1
+# Provider config format version. Currently always 1.
+
+providers:
+  # A list of dashboard providers. Each provider defines one source of dashboards.
+
+  - name: LLM Platform
+    # A human-readable name for this provider. Appears in Grafana's admin UI.
+    # Multiple providers can exist (e.g. one for "Infrastructure" dashboards,
+    # one for "Application" dashboards stored in different directories).
+
+    folder: LLM
+    # The Grafana folder (organizational grouping) where dashboards from this
+    # provider will appear in the Grafana UI sidebar.
+    # Creating a folder keeps LLM-specific dashboards separate from any others.
+
+    type: file
+    # The provider type. "file" means: read dashboards from the local filesystem.
+    # Other types include "s3" and database providers, but "file" is standard
+    # for Docker/Kubernetes deployments where you mount config as volumes.
+
+    options:
+      path: /var/lib/grafana/dashboards
+      # The path INSIDE the Grafana container to scan for dashboard JSON files.
+      # In docker-compose.yml, we mount the host directory here:
+      #   volumes:
+      #     - ./grafana/dashboards:/var/lib/grafana/dashboards
+      # So any .json file you place in ./grafana/dashboards/ on the host
+      # will be automatically loaded by Grafana at startup.
+      #
+      # To add the official vLLM community dashboard:
+      #   1. Go to grafana.com/grafana/dashboards/17619
+      #   2. Download the JSON
+      #   3. Save it to ./grafana/dashboards/vllm.json
+      #   4. Restart Grafana: docker compose restart grafana

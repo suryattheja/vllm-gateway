@@ -1,0 +1,17 @@
+# requirements.txt — Python dependencies for the gateway service
+# These are installed by pip inside the Docker container when the image is built.
+# Pin exact versions (==) for reproducibility — "pip install fastapi" might install
+# a different version tomorrow and break things. Exact pins mean every build is identical.
+
+fastapi==0.111.0          # The web framework. Handles routing, validation, OpenAPI docs.
+uvicorn==0.29.0           # The ASGI server that actually runs FastAPI. Handles TCP connections,
+                          # HTTP parsing, and dispatches requests to FastAPI's async handlers.
+httpx==0.27.0             # Async HTTP client used to forward requests to vLLM.
+                          # Unlike the "requests" library, httpx supports async/await.
+slowapi==0.1.9            # Rate limiting middleware for FastAPI/Starlette apps.
+prometheus-client==0.20.0 # Official Python Prometheus library. Maintains metric state
+                          # in memory and exposes it at /metrics for Prometheus to scrape.
+python-json-logger==2.0.7 # Replaces Python's default text log formatter with JSON output.
+                          # Makes logs machine-parseable by log aggregation tools.
+pydantic==2.7.0           # Data validation library. FastAPI uses it to parse and validate
+                          # request/response bodies against our Python class definitions.

@@ -1,0 +1,91 @@
+# prometheus/prometheus.yml — Prometheus Scrape Configuration
+#
+# This file tells Prometheus two things:
+#   1. Global settings: how often to scrape, how often to evaluate alert rules
+#   2. scrape_configs: the list of targets to scrape (which services + which ports/paths)
+#
+# "Scraping" means: Prometheus makes an HTTP GET request to <target>/metrics,
+# parses the response (Prometheus text exposition format), and stores the values
+# as time-series data internally with the current timestamp.
+#
+# This file is mounted into the Prometheus container in docker-compose.yml:
+#   volumes:
+#     - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+
+global:
+  scrape_interval: 15s
+  # How often Prometheus polls each target's /metrics endpoint.
+  # Every 15 seconds, it GETs http://vllm:8000/metrics, http://gateway:8080/metrics, etc.
+  # Shorter intervals = more data resolution but more storage and CPU usage.
+  # For a learning/benchmark session, 15s is a reasonable default.
+
+  evaluation_interval: 15s
+  # How often Prometheus evaluates alerting rules (if you define any).
+  # We don't have alert rules in this project, but this must be set.
+  # Typically matches scrape_interval.
+
+
+scrape_configs:
+  # scrape_configs is a list of "jobs." Each job defines one group of targets to scrape.
+  # Prometheus labels all metrics from a job with: job="<job_name>"
+  # This lets you filter in Grafana: e.g. show metrics only from the 'vllm' job.
+
+  # -------------------------------------------------------------------------
+  # Job 1: vLLM Inference Server
+  # -------------------------------------------------------------------------
+  # Scrapes vLLM's built-in /metrics endpoint.
+  # vLLM exposes metrics like:
+  #   vllm:gpu_cache_usage_perc        — KV cache fill percentage
+  #   vllm:num_requests_running        — requests currently being decoded
+  #   vllm:num_requests_waiting        — requests queued, waiting for GPU time
+  #   vllm:e2e_request_latency_seconds — histogram of full request latency
+  #   vllm:time_to_first_token_seconds — histogram of TTFT (prefill time)
+  #   vllm:avg_prompt_throughput_toks_per_s
+  #   vllm:avg_generation_throughput_toks_per_s
+  - job_name: 'vllm'
+    static_configs:
+      - targets: ['vllm:8000']
+      # 'vllm' is Docker Compose's internal DNS name for the vLLM container.
+      # Prometheus runs inside the same Docker network, so it resolves to the
+      # vLLM container's internal IP automatically.
+    metrics_path: '/metrics'
+    # vLLM serves metrics at /metrics on the same port as the API (8000).
+    # This is the default Prometheus path — included here explicitly for clarity.
+    scrape_interval: 5s
+    # Override the global 15s interval for vLLM specifically.
+    # KV cache utilization and queue depth change rapidly under load.
+    # 5s gives us finer-grained visibility into batching and cache behavior.
+
+  # -------------------------------------------------------------------------
+  # Job 2: Gateway Service
+  # -------------------------------------------------------------------------
+  # Scrapes our FastAPI gateway's /metrics endpoint.
+  # The gateway exposes custom metrics defined in middleware.py:
+  #   gateway_requests_total              — counter, by method/endpoint/status/key
+  #   gateway_request_latency_seconds     — histogram, end-to-end latency
+  #   gateway_active_requests             — gauge, current in-flight count
+  #   gateway_tokens_total                — counter, by prompt/completion
+  #   gateway_rate_limited_total          — counter, rejected requests
+  - job_name: 'gateway'
+    static_configs:
+      - targets: ['gateway:8080']
+      # 'gateway' resolves to the gateway container inside the Docker network.
+    metrics_path: '/metrics'
+    # FastAPI mounts the prometheus_client ASGI app at /metrics in main.py.
+
+  # -------------------------------------------------------------------------
+  # Job 3: NVIDIA GPU Hardware Exporter
+  # -------------------------------------------------------------------------
+  # Scrapes the nvidia-gpu-exporter, which queries NVML (the same library
+  # that powers nvidia-smi) and exposes GPU hardware metrics in Prometheus format.
+  # Key metrics:
+  #   nvidia_gpu_utilization            — SM (shader core) utilization percentage
+  #   nvidia_gpu_memory_used_bytes      — VRAM currently consumed
+  #   nvidia_gpu_memory_total_bytes     — Total VRAM available
+  #   nvidia_gpu_temperature_celsius    — GPU die temperature
+  #   nvidia_gpu_power_usage_milliwatts — Current power draw
+  - job_name: 'nvidia-gpu'
+    static_configs:
+      - targets: ['nvidia-exporter:9835']
+      # nvidia-exporter is the Docker Compose service name.
+      # Port 9835 is the default port for this exporter.

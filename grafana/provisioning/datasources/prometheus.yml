@@ -1,0 +1,45 @@
+# grafana/provisioning/datasources/prometheus.yml — Grafana Data Source Provisioning
+#
+# Grafana "provisioning" means: instead of manually clicking through the UI to add
+# a data source, you define it as a YAML file and Grafana reads it automatically
+# at startup. This makes the setup fully reproducible — no manual steps required.
+#
+# This file is mounted into the Grafana container in docker-compose.yml:
+#   volumes:
+#     - ./grafana/provisioning:/etc/grafana/provisioning
+#
+# Grafana looks in /etc/grafana/provisioning/datasources/ for .yml files at startup.
+# Every file it finds there is processed as a data source definition.
+
+apiVersion: 1
+# The provisioning config format version. Version 1 is the current and only version.
+# Required field — Grafana uses it to know how to parse this file.
+
+datasources:
+  # A list of data source definitions. Each item configures one connection
+  # from Grafana to a backend data store (Prometheus, InfluxDB, Loki, etc.)
+
+  - name: Prometheus
+    # The display name for this data source in Grafana's UI.
+    # This name appears in panel editors when you choose which data source to query.
+
+    type: prometheus
+    # The data source plugin type. "prometheus" tells Grafana to use its built-in
+    # Prometheus plugin, which knows how to speak the Prometheus HTTP query API
+    # and translate PromQL queries into chart data.
+
+    url: http://prometheus:9090
+    # The URL where Grafana will send PromQL queries.
+    # "prometheus" resolves to the Prometheus container via Docker's internal DNS.
+    # Port 9090 is Prometheus's default HTTP API port.
+    # From inside the Docker network, no port mapping is needed.
+
+    isDefault: true
+    # Mark this as the default data source.
+    # When creating a new Grafana panel, this data source is pre-selected,
+    # saving a click. With only one data source, this is always true.
+
+    editable: true
+    # Allow editing this data source through the Grafana UI after provisioning.
+    # Set to false in production to prevent accidental config changes.
+    # For learning/development, true is more convenient.
