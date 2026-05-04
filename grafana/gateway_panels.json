@@ -1,0 +1,260 @@
+[
+  {
+    "title": "Gateway — Active Requests (Live)",
+    "type": "gauge",
+    "description": "Number of requests currently in-flight inside the gateway at this exact moment. This is the GATEWAY_ACTIVE_REQUESTS Gauge from middleware.py — it increments when a request arrives and decrements when it finishes. A value that climbs and never comes back down means requests are hanging or timing out waiting for vLLM.",
+    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+    "fieldConfig": {
+      "defaults": {
+        "unit": "short",
+        "min": 0,
+        "max": 50,
+        "thresholds": {
+          "mode": "absolute",
+          "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 10 },
+            { "color": "red", "value": 30 }
+          ]
+        }
+      }
+    },
+    "options": {
+      "reduceOptions": { "calcs": ["lastNotNull"] },
+      "showThresholdMarkers": true
+    },
+    "targets": [
+      {
+        "expr": "gateway_active_requests",
+        "legendFormat": "Active",
+        "refId": "A"
+      }
+    ],
+    "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 }
+  },
+
+  {
+    "title": "Gateway — Request Rate (req/sec)",
+    "type": "timeseries",
+    "description": "Per-second request rate through the gateway, broken down by HTTP status code. Green 200s = successful completions. Orange 429s = rate-limited rejections (clients hitting your RATE_LIMIT_RPM). Red 500/504s = vLLM errors or timeouts. Uses rate() which computes the per-second average over the last 1 minute rolling window.",
+    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+    "fieldConfig": {
+      "defaults": {
+        "unit": "reqps",
+        "custom": { "lineWidth": 2, "fillOpacity": 10 }
+      },
+      "overrides": [
+        { "matcher": { "id": "byName", "options": "200" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
+        { "matcher": { "id": "byName", "options": "429" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] },
+        { "matcher": { "id": "byName", "options": "500" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+        { "matcher": { "id": "byName", "options": "504" }, "properties": [{ "id": "color", "value": { "fixedColor": "dark-red", "mode": "fixed" } }] }
+      ]
+    },
+    "options": {
+      "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" }
+    },
+    "targets": [
+      {
+        "expr": "sum by (status_code) (rate(gateway_requests_total[1m]))",
+        "legendFormat": "{{status_code}}",
+        "refId": "A"
+      }
+    ],
+    "gridPos": { "h": 6, "w": 9, "x": 6, "y": 0 }
+  },
+
+  {
+    "title": "Gateway — Rate Limited Requests/sec",
+    "type": "stat",
+    "description": "Rate of requests being rejected by the slowapi rate limiter (HTTP 429). Incremented by GATEWAY_RATE_LIMITED counter in middleware.py. A non-zero value means at least one client is exceeding the RATE_LIMIT_RPM setting. During load tests at 10x concurrency you will likely see this appear.",
+    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+    "fieldConfig": {
+      "defaults": {
+        "unit": "reqps",
+        "thresholds": {
+          "mode": "absolute",
+          "steps": [
+            { "color": "green", "value": null },
+            { "color": "orange", "value": 0.01 },
+            { "color": "red", "value": 1 }
+          ]
+        },
+        "color": { "mode": "thresholds" }
+      }
+    },
+    "options": {
+      "reduceOptions": { "calcs": ["lastNotNull"] },
+      "colorMode": "background",
+      "graphMode": "area",
+      "textMode": "auto"
+    },
+    "targets": [
+      {
+        "expr": "rate(gateway_rate_limited_total[1m])",
+        "legendFormat": "Rate Limited",
+        "refId": "A"
+      }
+    ],
+    "gridPos": { "h": 6, "w": 9, "x": 15, "y": 0 }
+  },
+
+  {
+    "title": "Gateway — End-to-End Latency P50 / P95 / P99",
+    "type": "timeseries",
+    "description": "End-to-end request latency as measured by the gateway — from the moment the gateway receives the request to the moment it finishes sending the response. Computed from the GATEWAY_REQUEST_LATENCY histogram using histogram_quantile(). P50 = median user experience. P95 = what 95% of users see. P99 = worst-case tail latency. The gap between P50 and P99 tells you how much variance there is — a large gap means some requests are getting stuck (likely waiting for KV cache space).",
+    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+    "fieldConfig": {
+      "defaults": {
+        "unit": "s",
+        "custom": { "lineWidth": 2, "fillOpacity": 8 }
+      },
+      "overrides": [
+        { "matcher": { "id": "byName", "options": "P50" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
+        { "matcher": { "id": "byName", "options": "P95" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] },
+        { "matcher": { "id": "byName", "options": "P99" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] }
+      ]
+    },
+    "options": {
+      "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" }
+    },
+    "targets": [
+      {
+        "expr": "histogram_quantile(0.50, sum(rate(gateway_request_latency_seconds_bucket[1m])) by (le))",
+        "legendFormat": "P50",
+        "refId": "A"
+      },
+      {
+        "expr": "histogram_quantile(0.95, sum(rate(gateway_request_latency_seconds_bucket[1m])) by (le))",
+        "legendFormat": "P95",
+        "refId": "B"
+      },
+      {
+        "expr": "histogram_quantile(0.99, sum(rate(gateway_request_latency_seconds_bucket[1m])) by (le))",
+        "legendFormat": "P99",
+        "refId": "C"
+      }
+    ],
+    "gridPos": { "h": 7, "w": 24, "x": 0, "y": 6 }
+  },
+
+  {
+    "title": "Gateway — Token Throughput (tokens/sec)",
+    "type": "timeseries",
+    "description": "Tokens processed per second through the gateway, split by prompt tokens (input) and completion tokens (output). Prompt tokens drive the prefill phase (KV cache filling). Completion tokens drive the decode phase (autoregressive generation). A high prompt/completion ratio means your traffic is input-heavy — watch for KV cache pressure. These counters come from vLLM's usage object in each response, accumulated in GATEWAY_TOKEN_USAGE in middleware.py.",
+    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+    "fieldConfig": {
+      "defaults": {
+        "unit": "short",
+        "custom": { "lineWidth": 2, "fillOpacity": 10 }
+      }
+    },
+    "options": {
+      "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" }
+    },
+    "targets": [
+      {
+        "expr": "rate(gateway_tokens_total{type=\"prompt\"}[1m])",
+        "legendFormat": "Prompt tokens/sec",
+        "refId": "A"
+      },
+      {
+        "expr": "rate(gateway_tokens_total{type=\"completion\"}[1m])",
+        "legendFormat": "Completion tokens/sec",
+        "refId": "B"
+      }
+    ],
+    "gridPos": { "h": 7, "w": 12, "x": 0, "y": 13 }
+  },
+
+  {
+    "title": "Gateway — Cumulative Tokens Processed",
+    "type": "stat",
+    "description": "Running total of tokens processed since the gateway started, split by type. This is the raw counter value (not a rate). Useful for a quick sanity check that traffic is flowing and for estimating total compute consumed during a benchmark run.",
+    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+    "fieldConfig": {
+      "defaults": {
+        "unit": "short",
+        "color": { "mode": "palette-classic" },
+        "thresholds": {
+          "mode": "absolute",
+          "steps": [{ "color": "blue", "value": null }]
+        }
+      }
+    },
+    "options": {
+      "reduceOptions": { "calcs": ["lastNotNull"] },
+      "colorMode": "value",
+      "graphMode": "none",
+      "textMode": "value_and_name",
+      "orientation": "vertical"
+    },
+    "targets": [
+      {
+        "expr": "gateway_tokens_total{type=\"prompt\"}",
+        "legendFormat": "Prompt Tokens",
+        "refId": "A"
+      },
+      {
+        "expr": "gateway_tokens_total{type=\"completion\"}",
+        "legendFormat": "Completion Tokens",
+        "refId": "B"
+      }
+    ],
+    "gridPos": { "h": 7, "w": 12, "x": 12, "y": 13 }
+  },
+
+  {
+    "title": "Gateway — Requests by API Key Prefix",
+    "type": "piechart",
+    "description": "Request distribution across API key prefixes (first 8 characters). In our setup the keys are key-dev-, key-test-, key-prod-. During load tests all traffic comes from key-dev-1. In a real deployment this shows which client or team is generating the most traffic — useful for capacity planning and per-client billing.",
+    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+    "fieldConfig": {
+      "defaults": { "unit": "short" }
+    },
+    "options": {
+      "legend": { "displayMode": "table", "placement": "right" },
+      "pieType": "pie",
+      "displayLabels": ["name", "percent"]
+    },
+    "targets": [
+      {
+        "expr": "sum by (api_key_prefix) (increase(gateway_requests_total[1h]))",
+        "legendFormat": "{{api_key_prefix}}",
+        "refId": "A"
+      }
+    ],
+    "gridPos": { "h": 7, "w": 12, "x": 0, "y": 20 }
+  },
+
+  {
+    "title": "Gateway — Error Rate %",
+    "type": "timeseries",
+    "description": "Percentage of requests resulting in non-200 responses over a 1-minute rolling window. Formula: (non-200 requests / total requests) * 100. A rising error rate during load tests indicates vLLM is returning errors (likely OOM, timeout, or model errors) rather than the gateway rejecting requests. Cross-reference with the vLLM logs: docker compose logs -f vllm.",
+    "datasource": { "type": "prometheus", "uid": "${datasource}" },
+    "fieldConfig": {
+      "defaults": {
+        "unit": "percent",
+        "custom": { "lineWidth": 2, "fillOpacity": 15 },
+        "color": { "fixedColor": "red", "mode": "fixed" },
+        "thresholds": {
+          "mode": "absolute",
+          "steps": [
+            { "color": "green", "value": null },
+            { "color": "red", "value": 1 }
+          ]
+        }
+      }
+    },
+    "options": {
+      "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" }
+    },
+    "targets": [
+      {
+        "expr": "sum(rate(gateway_requests_total{status_code!=\"200\"}[1m])) / sum(rate(gateway_requests_total[1m])) * 100",
+        "legendFormat": "Error Rate %",
+        "refId": "A"
+      }
+    ],
+    "gridPos": { "h": 7, "w": 12, "x": 12, "y": 20 }
+  }
+]
